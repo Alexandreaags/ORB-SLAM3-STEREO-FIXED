@@ -29,6 +29,7 @@
 #include<opencv2/core/core.hpp>
 
 #include "Tracking.h"
+#include "FrameStats.h"
 #include "FrameDrawer.h"
 #include "MapDrawer.h"
 #include "Atlas.h"
@@ -176,6 +177,8 @@ public:
     int GetTrackingState();
     std::vector<MapPoint*> GetTrackedMapPoints();
     std::vector<cv::KeyPoint> GetTrackedKeyPointsUn();
+    // Keypoint and match counts of the last frame (filled by TrackStereo only)
+    FrameStats GetFrameStats();
 
     // For debugging
     double GetTimeFromIMUInit();
@@ -253,6 +256,7 @@ private:
     int mTrackingState;
     std::vector<MapPoint*> mTrackedMapPoints;
     std::vector<cv::KeyPoint> mTrackedKeyPointsUn;
+    FrameStats mFrameStats;
     std::mutex mMutexState;
 
     //

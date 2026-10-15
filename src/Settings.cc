@@ -429,6 +429,13 @@ namespace ORB_SLAM3 {
         else{
             insertKFsWhenLost_ = true;
         }
+
+        initMinAccChange_ = readParameter<float>(fSettings,"IMU.InitMinAccChange",found,false);
+        if(!found) initMinAccChange_ = 0.5f;
+        initMinKFMotion_ = readParameter<float>(fSettings,"IMU.InitMinKFMotion",found,false);
+        if(!found) initMinKFMotion_ = 0.02f;
+        initTimeKFMotion_ = readParameter<float>(fSettings,"IMU.InitTimeKFMotion",found,false);
+        if(!found) initTimeKFMotion_ = 0.05f;
     }
 
     void Settings::readRGBD(cv::FileStorage& fSettings) {
@@ -624,6 +631,9 @@ namespace ORB_SLAM3 {
             output << "\t-Gyro walk: " << settings.gyroWalk_ << endl;
             output << "\t-Accelerometer walk: " << settings.accWalk_ << endl;
             output << "\t-IMU frequency: " << settings.imuFrequency_ << endl;
+            output << "\t-IMU init min acceleration change: " << settings.initMinAccChange_ << endl;
+            output << "\t-IMU init min keyframe motion: " << settings.initMinKFMotion_ << endl;
+            output << "\t-IMU init timed keyframe motion: " << settings.initTimeKFMotion_ << endl;
         }
 
         if(settings.sensor_ == System::RGBD || settings.sensor_ == System::IMU_RGBD){

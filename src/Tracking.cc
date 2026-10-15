@@ -603,6 +603,12 @@ void Tracking::newParameterLoader(Settings *settings) {
     //IMU parameters
     Sophus::SE3f Tbc = settings->Tbc();
     mInsertKFsLost = settings->insertKFsWhenLost();
+    mInitMinAccChange = settings->initMinAccChange();
+    mInitMinKFMotion = settings->initMinKFMotion();
+    mInitTimeKFMotion = settings->initTimeKFMotion();
+    // The original code sets this only in the old settings parser (constructor), so with File.version "1.0" it was
+    // left uninitialized. It is the number of frames after a relocalization/new map tracked without the IMU.
+    mnFramesToResetIMU = mMaxFrames;
     mImuFreq = settings->imuFrequency();
     mImuPer = 0.001; //1.0 / (double) mImuFreq;     //TODO: ESTO ESTA BIEN?
     float Ng = settings->noiseGyro();
@@ -1509,9 +1515,29 @@ Sophus::SE3f Tracking::GrabImageStereo(const cv::Mat &imRectLeft, const cv::Mat 
     vdStereoMatch_ms.push_back(mCurrentFrame.mTimeStereoMatch);
 #endif
 
+    // Keypoints and stereo matches are known now; Track() adds the map matches and the keyframe flag
+    mFrameStats = FrameStats();
+    mFrameStats.timestamp = timestamp;
+    if(mCurrentFrame.Nleft == -1) // rectified pinhole pair: mvuRight[i] >= 0 when keypoint i has a right match
+    {
+        mFrameStats.nKeysLeft = mCurrentFrame.N;
+        mFrameStats.nKeysRight = mCurrentFrame.mvKeysRight.size();
+        mFrameStats.nStereoMatches = count_if(mCurrentFrame.mvuRight.begin(), mCurrentFrame.mvuRight.end(),
+                                              [](float u){ return u >= 0; });
+    }
+    else
+    {
+        mFrameStats.nKeysLeft = mCurrentFrame.Nleft;
+        mFrameStats.nKeysRight = mCurrentFrame.Nright;
+        mFrameStats.nStereoMatches = count_if(mCurrentFrame.mvLeftToRightMatch.begin(), mCurrentFrame.mvLeftToRightMatch.end(),
+                                              [](int i){ return i >= 0; });
+    }
+
     //cout << "Tracking start" << endl;
     Track();
     //cout << "Tracking end" << endl;
+
+    mFrameStats.state = mState;
 
     return mCurrentFrame.GetPose();
 }
@@ -1787,7 +1813,18 @@ bool Tracking::PredictStateIMU()
 
 void Tracking::ResetFrameIMU()
 {
-    // TODO To implement...
+    // Original: TODO, empty. Called mnFramesToResetIMU frames after a relocalization or a new map.
+    // After a relocalization made in RECENTLY_LOST, set the velocity from the visual poses tracked since then
+    // and ask for a keyframe, so that the next IMU predictions start from a visually anchored state.
+    if(!ImuVelocityPendingAfterReloc())
+        return;
+    mbImuVelocityPending = false;
+
+    const double dt = mCurrentFrame.mTimeStamp - mImuRelocTimeStamp;
+    if(dt <= 0)
+        return;
+    mCurrentFrame.SetVelocity((mCurrentFrame.GetImuPosition() - mImuRelocTwb) / dt);
+    mbForceKeyFrame = true;
 }
 
 
@@ -1958,8 +1995,11 @@ void Tracking::Track()
 
                 if (!bOK)
                 {
+                    // After a relocalization made in RECENTLY_LOST, go back to RECENTLY_LOST (relocalize again)
+                    // instead of starting a new map
                     if ( mCurrentFrame.mnId<=(mnLastRelocFrameId+mnFramesToResetIMU) &&
-                         (mSensor==System::IMU_MONOCULAR || mSensor==System::IMU_STEREO || mSensor == System::IMU_RGBD))
+                         (mSensor==System::IMU_MONOCULAR || mSensor==System::IMU_STEREO || mSensor == System::IMU_RGBD) &&
+                         !ImuVelocityPendingAfterReloc())
                     {
                         mState = LOST;
                     }
@@ -1985,12 +2025,37 @@ void Tracking::Track()
                     bOK = true;
                     if((mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD))
                     {
+                        // Original: only PredictStateIMU() here. A visual relocalization is tried first, as in
+                        // visual-only mode; the IMU prediction is the fallback, unless the velocity is still unknown
+                        // after a previous relocalization.
+                        bool bReloc = false;
                         if(pCurrentMap->isImuInitialized())
-                            PredictStateIMU();
+                        {
+                            bReloc = Relocalization();
+                            if(bReloc)
+                            {
+                                // The velocity integrated while lost is not trusted: zero until ResetFrameIMU()
+                                mCurrentFrame.SetVelocity(Eigen::Vector3f::Zero());
+                                mnImuRelocFrameId = mnLastRelocFrameId;
+                                mImuRelocTimeStamp = mCurrentFrame.mTimeStamp;
+                                mImuRelocTwb = mCurrentFrame.GetImuPosition();
+                                mbImuVelocityPending = true;
+                            }
+                            else
+                            {
+                                // Drop the matches/pose of the failed attempt (PredictStateIMU sets the pose)
+                                fill(mCurrentFrame.mvpMapPoints.begin(),mCurrentFrame.mvpMapPoints.end(),static_cast<MapPoint*>(NULL));
+                                fill(mCurrentFrame.mvbOutlier.begin(),mCurrentFrame.mvbOutlier.end(),false);
+                                if(ImuVelocityPendingAfterReloc())
+                                    bOK = false;
+                                else
+                                    PredictStateIMU();
+                            }
+                        }
                         else
                             bOK = false;
 
-                        if (mCurrentFrame.mTimeStamp-mTimeStampLost>time_recently_lost)
+                        if (!bReloc && mCurrentFrame.mTimeStamp-mTimeStampLost>time_recently_lost)
                         {
                             mState = LOST;
                             Verbose::PrintMess("Track Lost...", Verbose::VERBOSITY_NORMAL);
@@ -2163,18 +2228,9 @@ void Tracking::Track()
             //}
         }
 
-        // Save frame if recent relocalization, since they are used for IMU reset (as we are making copy, it shluld be once mCurrFrame is completely modified)
-        if((mCurrentFrame.mnId<(mnLastRelocFrameId+mnFramesToResetIMU)) && (mCurrentFrame.mnId > mnFramesToResetIMU) &&
-           (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD) && pCurrentMap->isImuInitialized())
-        {
-            // TODO check this situation
-            Verbose::PrintMess("Saving pointer to frame. imu needs reset...", Verbose::VERBOSITY_NORMAL);
-            Frame* pF = new Frame(mCurrentFrame);
-            pF->mpPrevFrame = new Frame(mLastFrame);
-
-            // Load preintegration
-            pF->mpImuPreintegratedFrame = new IMU::Preintegrated(mCurrentFrame.mpImuPreintegratedFrame);
-        }
+        // Original: here each frame after a relocalization was copied (new Frame x2 + new Preintegrated) for an IMU reset
+        // that was never implemented; the copies were not stored, so they only leaked memory. Removed once
+        // mnFramesToResetIMU got initialized (newParameterLoader), which made this block reachable.
 
         if(pCurrentMap->isImuInitialized())
         {
@@ -2242,6 +2298,10 @@ void Tracking::Track()
             std::chrono::steady_clock::time_point time_StartNewKF = std::chrono::steady_clock::now();
 #endif
             bool bNeedKF = NeedNewKeyFrame();
+            // Keyframe asked by ResetFrameIMU() after a relocalization (skipped while a loop closure stops Local Mapping)
+            if(mbForceKeyFrame && bOK && mnLastRelocFrameId == mnImuRelocFrameId &&
+               !mpLocalMapper->isStopped() && !mpLocalMapper->stopRequested())
+                bNeedKF = true;
 
             // Check if we need to insert a new keyframe
             // if(bNeedKF && bOK)
@@ -2344,7 +2404,7 @@ void Tracking::StereoInitialization()
                 return;
             }
 
-            if (!mFastInit && (mCurrentFrame.mpImuPreintegratedFrame->avgA-mLastFrame.mpImuPreintegratedFrame->avgA).norm()<0.5)
+            if (!mFastInit && (mCurrentFrame.mpImuPreintegratedFrame->avgA-mLastFrame.mpImuPreintegratedFrame->avgA).norm()<mInitMinAccChange)
             {
                 cout << "not enough acceleration" << endl;
                 return;
@@ -2371,6 +2431,7 @@ void Tracking::StereoInitialization()
 
         // Create KeyFrame
         KeyFrame* pKFini = new KeyFrame(mCurrentFrame,mpAtlas->GetCurrentMap(),mpKeyFrameDB);
+        mFrameStats.bKeyFrame = true;
 
         // Insert KeyFrame in the map
         mpAtlas->AddKeyFrame(pKFini);
@@ -3024,6 +3085,9 @@ bool Tracking::TrackLocalMap()
         }
     }
 
+    mFrameStats.nMapMatches = aux1;
+    mFrameStats.nInliers = mnMatchesInliers;
+
     // Decide if the tracking was succesful
     // More restrictive if there was a relocalization recently
     mpLocalMapper->mnMatchesInliers=mnMatchesInliers;
@@ -3222,6 +3286,8 @@ void Tracking::CreateNewKeyFrame()
         return;
 
     KeyFrame* pKF = new KeyFrame(mCurrentFrame,mpAtlas->GetCurrentMap(),mpKeyFrameDB);
+    mFrameStats.bKeyFrame = true;
+    mbForceKeyFrame = false;
 
     if(mpAtlas->isImuInitialized()) //  || mpLocalMapper->IsInitializing())
         pKF->bImu = true;

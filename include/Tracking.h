@@ -29,6 +29,7 @@
 #include "LocalMapping.h"
 #include "LoopClosing.h"
 #include "Frame.h"
+#include "FrameStats.h"
 #include "ORBVocabulary.h"
 #include "KeyFrameDatabase.h"
 #include "ORBextractor.h"
@@ -137,6 +138,15 @@ public:
     // Current Frame
     Frame mCurrentFrame;
     Frame mLastFrame;
+
+    // Feature and match counts of the last frame given to GrabImageStereo (benchmarking)
+    FrameStats mFrameStats;
+
+    // IMU initialization thresholds (Settings: IMU.InitMinAccChange, IMU.InitMinKFMotion, IMU.InitTimeKFMotion).
+    // Defaults are the original ORB-SLAM3 constants; LocalMapping reads the last two.
+    float mInitMinAccChange = 0.5f;
+    float mInitMinKFMotion = 0.02f;
+    float mInitTimeKFMotion = 0.05f;
 
     cv::Mat mImGray;
 
@@ -321,6 +331,20 @@ protected:
     unsigned int mnLastRelocFrameId;
     double mTimeStampLost;
     double time_recently_lost;
+
+    // Visual relocalization while RECENTLY_LOST in inertial mode (added for the benchmark; the original code only
+    // integrates the IMU there, so a wrong velocity/bias makes the pose drift and the map is never matched again).
+    // After it the IMU velocity is unknown: it is re-estimated from the visual poses of the next mnFramesToResetIMU
+    // frames (ResetFrameIMU) and a keyframe is inserted, before the IMU prediction is used again.
+    // Frame id, time and IMU position of the relocalized frame, and the pending velocity/keyframe flags:
+    unsigned int mnImuRelocFrameId = static_cast<unsigned int>(-1);
+    double mImuRelocTimeStamp = 0.0;
+    Eigen::Vector3f mImuRelocTwb = Eigen::Vector3f::Zero();
+    bool mbImuVelocityPending = false;
+    bool mbForceKeyFrame = false;
+    bool ImuVelocityPendingAfterReloc() const {
+        return mbImuVelocityPending && mnLastRelocFrameId == mnImuRelocFrameId;
+    }
 
     unsigned int mnFirstFrameId;
     unsigned int mnInitialFrameId;

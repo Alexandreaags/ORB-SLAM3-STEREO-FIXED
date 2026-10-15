@@ -321,6 +321,7 @@ Sophus::SE3f System::TrackStereo(const cv::Mat &imLeft, const cv::Mat &imRight, 
     mTrackingState = mpTracker->mState;
     mTrackedMapPoints = mpTracker->mCurrentFrame.mvpMapPoints;
     mTrackedKeyPointsUn = mpTracker->mCurrentFrame.mvKeysUn;
+    mFrameStats = mpTracker->mFrameStats;
 
     return Tcw;
 }
@@ -1334,6 +1335,12 @@ vector<cv::KeyPoint> System::GetTrackedKeyPointsUn()
 {
     unique_lock<mutex> lock(mMutexState);
     return mTrackedKeyPointsUn;
+}
+
+FrameStats System::GetFrameStats()
+{
+    unique_lock<mutex> lock(mMutexState);
+    return mFrameStats;
 }
 
 double System::GetTimeFromIMUInit()

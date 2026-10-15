@@ -91,6 +91,9 @@ namespace ORB_SLAM3 {
         float imuFrequency() {return imuFrequency_;}
         Sophus::SE3f Tbc() {return Tbc_;}
         bool insertKFsWhenLost() {return insertKFsWhenLost_;}
+        float initMinAccChange() {return initMinAccChange_;}
+        float initMinKFMotion() {return initMinKFMotion_;}
+        float initTimeKFMotion() {return initTimeKFMotion_;}
 
         float depthMapFactor() {return depthMapFactor_;}
 
@@ -192,6 +195,11 @@ namespace ORB_SLAM3 {
         float imuFrequency_;
         Sophus::SE3f Tbc_;
         bool insertKFsWhenLost_;
+
+        // IMU initialization thresholds (optional, defaults = original ORB-SLAM3 constants)
+        float initMinAccChange_;  // [m/s^2] mean acceleration change between frames needed to start a stereo-inertial map
+        float initMinKFMotion_;   // [m] map is reset if the camera moves less than this over the last two keyframes before BA2
+        float initTimeKFMotion_;  // [m] keyframe intervals count towards the initialization time only above this motion
 
         /*
          * RGBD stuff
